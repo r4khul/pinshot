@@ -17,13 +17,23 @@ class ExpirationWorker(appContext: Context, params: WorkerParameters) : Coroutin
         // Pinshot may not have been open when a screenshot was captured. Each
         // scheduled run must discover active screenshots before evaluating the
         // 24-hour lifecycle, otherwise only screenshots seen by the UI expire.
-        try {
-            repository.loadScreenshots()
+        val discovery = try {
+            repository.discoverScreenshots()
         } catch (_: SecurityException) {
             return Result.success()
         } catch (_: Exception) {
             return Result.retry()
         }
+        // WorkManager is the only platform-managed path available after the UI
+        // process is gone. The first scan establishes a quiet baseline, while
+        // later scans can confirm screenshots captured while Pinshot was closed.
+        if (CaptureNotificationTracker(applicationContext).shouldNotify(discovery.newlyTracked.size)) {
+            PinshotNotifications.postCaptureDetected(applicationContext, discovery.newlyTracked.size)
+        }
+        // Schedule exact-item reminders after every discovery pass. This also
+        // makes screenshots taken while Pinshot was closed eligible for a
+        // targeted warning as soon as Android lets the worker run.
+        ExpirationScheduler.scheduleWarnings(applicationContext, repository.metadata(), now)
         val warningItems = repository.expiringWithin(now, now + WARNING_WINDOW_MILLIS)
         if (warningItems.isNotEmpty()) {
             PinshotNotifications.postWarning(

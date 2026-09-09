@@ -18,23 +18,36 @@ import com.escapebranch.pinshot.R
 
 object NotificationDestinations {
     const val EXTRA_DESTINATION = "pinshot.notification.destination"
+    const val SCREENSHOTS = "screenshots"
     const val EXPIRING = "expiring"
     const val TRASH = "trash"
 }
 
 object PinshotNotifications {
-    const val CHANNEL_ID = "screenshot_lifecycle"
+    // A new ID is intentional: Android freezes a channel's importance after
+    // creation, so existing installs need a fresh high-visibility channel.
+    const val CHANNEL_ID = "screenshot_expiry_alerts_v2"
     const val WARNING_ID = 4101
     const val SUMMARY_ID = 4102
+    private const val CAPTURE_CHANNEL_ID = "screenshot_capture_updates_v1"
+    private const val CAPTURE_ID = 4103
 
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
+        val expiryChannel = NotificationChannel(
             CHANNEL_ID,
-            "Screenshot Expiration Alerts",
-            NotificationManager.IMPORTANCE_DEFAULT
+            "Screenshot expiry alerts",
+            NotificationManager.IMPORTANCE_HIGH
         ).apply { description = "Reminders before temporary screenshots move to trash" }
-        context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        val captureChannel = NotificationChannel(
+            CAPTURE_CHANNEL_ID,
+            "Screenshot capture updates",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply { description = "Updates when Pinshot finds a new screenshot" }
+        context.getSystemService(NotificationManager::class.java).apply {
+            createNotificationChannel(expiryChannel)
+            createNotificationChannel(captureChannel)
+        }
     }
 
     fun canPost(context: Context): Boolean =
@@ -57,14 +70,15 @@ object PinshotNotifications {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_pinshot_mark)
             .setColor(resolveAccentColor(context))
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(reviewIntent)
             .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .addAction(0, "Pin all", pinAllPendingIntent)
             .addAction(0, "Review", reviewIntent)
             .build()
@@ -76,16 +90,40 @@ object PinshotNotifications {
         ensureChannel(context)
         val body = "$count screenshots moved to trash. They remain recoverable for 30 days."
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_pinshot_mark)
             .setColor(resolveAccentColor(context))
             .setContentTitle("Storage cleaned up")
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(destinationIntent(context, NotificationDestinations.TRASH))
             .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         notifyIfAllowed(context, SUMMARY_ID, notification)
+    }
+
+    /** A concise confirmation for screenshots discovered after the initial scan. */
+    fun postCaptureDetected(context: Context, count: Int) {
+        if (!canPost(context) || count <= 0) return
+        ensureChannel(context)
+        val body = if (count == 1) {
+            "A screenshot was detected and added to Pinshot."
+        } else {
+            "$count screenshots were detected and added to Pinshot."
+        }
+        val notification = NotificationCompat.Builder(context, CAPTURE_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_pinshot_mark)
+            .setColor(resolveAccentColor(context))
+            .setContentTitle(if (count == 1) "Screenshot added to Pinshot" else "Screenshots added to Pinshot")
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setContentIntent(destinationIntent(context, NotificationDestinations.SCREENSHOTS))
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+        notifyIfAllowed(context, CAPTURE_ID, notification)
     }
 
     fun cancelWarning(context: Context) {
