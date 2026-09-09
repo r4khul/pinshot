@@ -11,8 +11,20 @@ interface ScreenshotDao {
     @Query("SELECT * FROM screenshots")
     fun observeAll(): Flow<List<ScreenshotItemEntity>>
 
+    @Query("SELECT * FROM screenshots WHERE isTrashed = 0")
+    fun observeActive(): Flow<List<ScreenshotItemEntity>>
+
+    @Query("SELECT * FROM screenshots WHERE isTrashed = 1")
+    fun observeTrashed(): Flow<List<ScreenshotItemEntity>>
+
     @Query("SELECT * FROM screenshots")
     suspend fun getAll(): List<ScreenshotItemEntity>
+
+    @Query("SELECT * FROM screenshots WHERE isTrashed = 1")
+    suspend fun getTrashed(): List<ScreenshotItemEntity>
+
+    @Query("SELECT * FROM screenshots WHERE uriString IN (:uriStrings)")
+    suspend fun getByUriStrings(uriStrings: List<String>): List<ScreenshotItemEntity>
 
     @Query("SELECT * FROM screenshots WHERE uriString = :uriString LIMIT 1")
     suspend fun get(uriString: String): ScreenshotItemEntity?
@@ -43,4 +55,7 @@ interface ScreenshotDao {
 
     @Query("DELETE FROM screenshots WHERE uriString = :uriString")
     suspend fun delete(uriString: String)
+
+    @Query("DELETE FROM screenshots WHERE uriString IN (:uriStrings)")
+    suspend fun deleteAll(uriStrings: List<String>)
 }

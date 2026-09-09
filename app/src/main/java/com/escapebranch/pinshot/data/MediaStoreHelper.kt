@@ -22,11 +22,78 @@ data class MediaStoreScreenshot(
 class MediaStoreHelper(context: Context) {
     private val resolver: ContentResolver = context.contentResolver
 
-    fun queryScreenshots(): List<MediaStoreScreenshot> = query(trashOnly = false)
+    fun queryScreenshots(): List<MediaStoreScreenshot> = queryActiveScreenshots()
 
-    fun queryTrashedScreenshots(): List<MediaStoreScreenshot> {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
-        return query(trashOnly = true)
+    /**
+     * Resolves Pinshot-owned trashed URIs in bounded provider queries. Android
+     * can move files out of the screenshots directory while trashing them, so
+     * the Room URI/date pair—not a post-trash path—is the ownership check.
+     */
+    fun queryKnownTrashedScreenshots(knownItems: List<ScreenshotItemEntity>): List<MediaStoreScreenshot> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || knownItems.isEmpty()) return emptyList()
+        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val matches = ArrayList<MediaStoreScreenshot>(knownItems.size)
+        val validItems = knownItems.mapNotNull { item ->
+            runCatching { ContentUris.parseId(Uri.parse(item.uriString)) }
+                .getOrNull()
+                ?.takeIf { it >= 0L }
+                ?.let { id -> id to item }
+        }
+
+        // Keep SQL bind variables below SQLite's limit. This searches only the
+        // known IDs, never every item in the device's general system trash.
+        validItems.chunked(MAX_TRASH_QUERY_IDS).forEach { chunk ->
+            val expectedDates = chunk.associate { (id, item) ->
+                ContentUris.withAppendedId(collection, id).toString() to item.dateAdded
+            }
+            val placeholders = List(chunk.size) { "?" }.joinToString(",")
+            resolver.query(
+                collection,
+                screenshotProjection(),
+                Bundle().apply {
+                    putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
+                    putString(
+                        ContentResolver.QUERY_ARG_SQL_SELECTION,
+                        "${MediaStore.Images.Media._ID} IN ($placeholders)"
+                    )
+                    putStringArray(
+                        ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
+                        chunk.map { (id, _) -> id.toString() }.toTypedArray()
+                    )
+                    putStringArray(
+                        ContentResolver.QUERY_ARG_SORT_COLUMNS,
+                        arrayOf(MediaStore.Images.Media.DATE_MODIFIED)
+                    )
+                    putInt(
+                        ContentResolver.QUERY_ARG_SORT_DIRECTION,
+                        ContentResolver.QUERY_SORT_DIRECTION_DESCENDING
+                    )
+                },
+                null
+            )?.use { rows ->
+                val idColumn = rows.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                val nameColumn = rows.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+                val dateColumn = rows.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+                val modifiedColumn = rows.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
+                val pathColumn = rows.getColumnIndexOrThrow(MediaStore.Images.Media.RELATIVE_PATH)
+                val trashedColumn = rows.getColumnIndexOrThrow(MediaStore.MediaColumns.IS_TRASHED)
+
+                while (rows.moveToNext()) {
+                    if (rows.getInt(trashedColumn) == 0) continue
+                    val uri = ContentUris.withAppendedId(collection, rows.getLong(idColumn))
+                    val dateAdded = TimeUnit.SECONDS.toMillis(rows.getLong(dateColumn))
+                    if (expectedDates[uri.toString()] != dateAdded) continue
+                    matches += MediaStoreScreenshot(
+                        uri = uri,
+                        displayName = rows.getString(nameColumn).orEmpty().ifBlank { "Screenshot" },
+                        dateAdded = dateAdded,
+                        relativePath = rows.getString(pathColumn).orEmpty(),
+                        dateModified = TimeUnit.SECONDS.toMillis(rows.getLong(modifiedColumn))
+                    )
+                }
+            }
+        }
+        return matches.sortedByDescending { it.dateModified }
     }
 
     /** Reads one Room-known screenshot that MediaStore currently marks trashed. */
@@ -126,7 +193,7 @@ class MediaStoreHelper(context: Context) {
         false
     }
 
-    private fun query(trashOnly: Boolean): List<MediaStoreScreenshot> {
+    private fun queryActiveScreenshots(): List<MediaStoreScreenshot> {
         val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         val projection = screenshotProjection()
 
@@ -139,15 +206,12 @@ class MediaStoreHelper(context: Context) {
                 Bundle().apply {
                     // Explicitly exclude trashed rows from the gallery. Some OEM
                     // providers do not reliably honour MATCH_DEFAULT here.
-                    putInt(
-                        MediaStore.QUERY_ARG_MATCH_TRASHED,
-                        if (trashOnly) MediaStore.MATCH_ONLY else MediaStore.MATCH_EXCLUDE
-                    )
+                    putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_EXCLUDE)
                     putString(ContentResolver.QUERY_ARG_SQL_SELECTION,
                         "(${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? OR ${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?)")
                     putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
                         arrayOf("Pictures/Screenshots%", "DCIM/Screenshots%"))
-                    putStringArray(ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Images.Media.DATE_MODIFIED))
+                    putStringArray(ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Images.Media.DATE_ADDED))
                     putInt(ContentResolver.QUERY_ARG_SORT_DIRECTION, ContentResolver.QUERY_SORT_DIRECTION_DESCENDING)
                 },
                 null
@@ -209,4 +273,9 @@ class MediaStoreHelper(context: Context) {
         relativePath.startsWith("Pictures/Screenshots") ||
             relativePath.startsWith("DCIM/Screenshots") ||
             (relativePath.isEmpty() && displayName.contains("screenshot", ignoreCase = true))
+
+    private companion object {
+        // 900 leaves headroom below SQLite's usual 999 bind-variable limit.
+        const val MAX_TRASH_QUERY_IDS = 900
+    }
 }

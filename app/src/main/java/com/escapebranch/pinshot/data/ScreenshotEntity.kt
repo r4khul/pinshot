@@ -1,10 +1,17 @@
 package com.escapebranch.pinshot.data
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /** Persistent metadata owned by Pinshot; image bytes remain in MediaStore. */
-@Entity(tableName = "screenshots")
+@Entity(
+    tableName = "screenshots",
+    indices = [
+        Index(value = ["isTrashed"]),
+        Index(value = ["isPinned", "isTrashed", "expirationTimestamp"])
+    ]
+)
 data class ScreenshotItemEntity(
     @PrimaryKey val uriString: String,
     val dateAdded: Long,

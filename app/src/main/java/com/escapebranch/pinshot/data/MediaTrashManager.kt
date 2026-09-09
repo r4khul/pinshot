@@ -33,6 +33,16 @@ class MediaTrashManager(context: Context) {
     fun restore(uri: Uri): MediaTrashResult = userInitiatedTransition(uri, trashed = false)
 
     /**
+     * A multi-selection is one user action, so it must become one platform
+     * PendingIntent—not several competing per-item consent flows.
+     */
+    fun createTrashRequest(uris: List<Uri>, trashed: Boolean): MediaTrashResult {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return MediaTrashResult.Unsupported
+        if (uris.isEmpty()) return MediaTrashResult.NotFound
+        return createTrashRequestInternal(uris, trashed)
+    }
+
+    /**
      * MANAGE_MEDIA suppresses Android's confirmation UI for this request; it
      * does not grant direct ContentResolver.delete access by itself.
      */
@@ -68,14 +78,14 @@ class MediaTrashManager(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return MediaTrashResult.Unsupported
         // The request must still be launched, but MANAGE_MEDIA means Android
         // performs it without displaying a per-item confirmation dialog.
-        if (canManageMedia()) return createTrashRequest(uri, trashed)
+        if (canManageMedia()) return createTrashRequestInternal(listOf(uri), trashed)
         return setTrashed(uri, trashed)
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
-    private fun createTrashRequest(uri: Uri, trashed: Boolean): MediaTrashResult = try {
+    private fun createTrashRequestInternal(uris: List<Uri>, trashed: Boolean): MediaTrashResult = try {
         MediaTrashResult.SystemTrashRequest(
-            MediaStore.createTrashRequest(resolver, listOf(uri), trashed).intentSender
+            MediaStore.createTrashRequest(resolver, uris, trashed).intentSender
         )
     } catch (throwable: Throwable) {
         MediaTrashResult.Failed(throwable)
