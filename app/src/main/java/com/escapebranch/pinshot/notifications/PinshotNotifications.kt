@@ -18,7 +18,6 @@ import com.escapebranch.pinshot.R
 
 object NotificationDestinations {
     const val EXTRA_DESTINATION = "pinshot.notification.destination"
-    const val SCREENSHOTS = "screenshots"
     const val EXPIRING = "expiring"
     const val TRASH = "trash"
 }
@@ -118,7 +117,7 @@ object PinshotNotifications {
             .setContentTitle(if (count == 1) "Screenshot added to Pinshot" else "Screenshots added to Pinshot")
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setContentIntent(destinationIntent(context, NotificationDestinations.SCREENSHOTS))
+            .setContentIntent(destinationIntent(context, NotificationDestinations.EXPIRING))
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
