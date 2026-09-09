@@ -3,13 +3,18 @@ package com.escapebranch.pinshot.ui
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Build
+import android.os.CancellationSignal
+import android.util.LruCache
+import android.util.Size
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.IntentSenderRequest
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,7 +47,7 @@ import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.RestoreFromTrash
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.Button
@@ -57,6 +62,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -70,12 +76,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -87,23 +94,19 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import coil.imageLoader
 import coil.request.CachePolicy
 import coil.request.ImageRequest
 import com.escapebranch.pinshot.ui.scrubber.BallisticFastScrubber
 import com.escapebranch.pinshot.ui.scrubber.TimelineSection
 import java.text.SimpleDateFormat
 import java.util.Calendar
-import java.util.Date
 import java.util.Locale
 import com.escapebranch.pinshot.data.ManageMediaPermissionContract
 import com.escapebranch.pinshot.notifications.NotificationDestinations
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterNotNull
-
-private const val PREFETCH_AHEAD_CELLS = 12
-private const val PREFETCH_THUMBNAIL_SIZE_PX = 256
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 private enum class PinshotTab(val label: String) {
     Screenshots("Screenshots"),
@@ -113,6 +116,10 @@ private enum class PinshotTab(val label: String) {
 
 private data class ViewerRequest(val item: ScreenshotUiItem, val isTrash: Boolean)
 private data class MonthKey(val year: Int, val month: Int)
+private data class GalleryContent(
+    val cells: List<GalleryCell>,
+    val timelineSections: List<TimelineSection>
+)
 
 private sealed interface GalleryCell {
     val key: String
@@ -128,6 +135,7 @@ private sealed interface GalleryCell {
         val year: Int,
         val month: Int,
         val itemCount: Int,
+        val startsYear: Boolean,
         override val key: String
     ) : GalleryCell
     data class Photo(val item: ScreenshotUiItem) : GalleryCell {
@@ -211,9 +219,22 @@ fun MainScreen(
             .forEach(selectedItems::remove)
     }
     LaunchedEffect(viewModel, snackbarHostState) {
-        viewModel.trashEvents.collect { item ->
-            if (snackbarHostState.showSnackbar("Moved to trash", "Undo") == SnackbarResult.ActionPerformed) {
-                viewModel.undoTrash(item)
+        viewModel.mediaSnackbarEvents.collect { event ->
+            when (event) {
+                is MediaSnackbarEvent.MovedToTrash -> {
+                    val label = if (event.count == 1) {
+                        "1 screenshot moved to trash"
+                    } else {
+                        "${event.count} screenshots moved to trash"
+                    }
+                    if (snackbarHostState.showBriefSnackbar(label, "Undo") == SnackbarResult.ActionPerformed) {
+                        viewModel.undoTrash(event.items)
+                    }
+                }
+                is MediaSnackbarEvent.Recovered -> {
+                    val label = if (event.count == 1) "1 screenshot recovered" else "${event.count} screenshots recovered"
+                    snackbarHostState.showBriefSnackbar(label)
+                }
             }
         }
     }
@@ -302,7 +323,10 @@ fun MainScreen(
                                 IconButton(enabled = !hasPendingMediaMutation, onClick = { selectedItems.values.forEach(viewModel::moveToExpiring); selectedItems.clear() }) {
                                     Icon(Icons.Filled.HourglassEmpty, "Move to Expiring")
                                 }
-                                IconButton(enabled = !hasPendingMediaMutation, onClick = { selectedItems.values.forEach(viewModel::moveToTrash); selectedItems.clear() }) {
+                                IconButton(enabled = !hasPendingMediaMutation, onClick = {
+                                    viewModel.moveToTrash(selectedItems.values.toList())
+                                    selectedItems.clear()
+                                }) {
                                     Icon(Icons.Filled.DeleteOutline, "Move to trash")
                                 }
                             }
@@ -310,13 +334,19 @@ fun MainScreen(
                                 IconButton(enabled = !hasPendingMediaMutation, onClick = { selectedItems.values.forEach(viewModel::pin); selectedItems.clear() }) {
                                     Icon(Icons.Filled.PushPin, "Pin selected")
                                 }
-                                IconButton(enabled = !hasPendingMediaMutation, onClick = { selectedItems.values.forEach(viewModel::moveToTrash); selectedItems.clear() }) {
+                                IconButton(enabled = !hasPendingMediaMutation, onClick = {
+                                    viewModel.moveToTrash(selectedItems.values.toList())
+                                    selectedItems.clear()
+                                }) {
                                     Icon(Icons.Filled.DeleteOutline, "Move to trash")
                                 }
                             }
                             PinshotTab.Trash -> {
-                                IconButton(enabled = !hasPendingMediaMutation, onClick = { selectedItems.values.forEach(viewModel::restore); selectedItems.clear() }) {
-                                    Icon(Icons.Filled.Restore, "Restore selected")
+                                IconButton(enabled = !hasPendingMediaMutation, onClick = {
+                                    viewModel.restore(selectedItems.values.toList())
+                                    selectedItems.clear()
+                                }) {
+                                    Icon(Icons.Filled.RestoreFromTrash, "Restore selected to Screenshots")
                                 }
                                 IconButton(enabled = !hasPendingMediaMutation, onClick = { permanentDeleteCandidates = selectedItems.values.toList(); selectedItems.clear() }) {
                                     Icon(Icons.Filled.DeleteOutline, "Permanently delete selected")
@@ -444,9 +474,11 @@ private fun DatedScreenshotGrid(
     onToggleSelection: (ScreenshotUiItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val cells = remember(items) { items.toGalleryCells() }
-    val timelineSections = remember(cells) { cells.toTimelineSections() }
-    PrefetchGalleryThumbnails(cells, gridState)
+    // This transformation happens only when MediaStore data changes, never as
+    // a consequence of a scroll frame. The source query is DATE_ADDED-desc,
+    // so one pass can build both the grid and the scrubber's binary-search map.
+    val galleryContent = remember(items) { items.toGalleryContent() }
+    val cells = galleryContent.cells
 
     Box(modifier = modifier.fillMaxSize()) {
         LazyVerticalGrid(
@@ -467,7 +499,13 @@ private fun DatedScreenshotGrid(
                         GridItemSpan(1)
                     }
                 },
-                contentType = { it::class }
+                contentType = { cell ->
+                    when (cell) {
+                        is GalleryCell.YearHeader -> "year-header"
+                        is GalleryCell.MonthHeader -> "month-header"
+                        is GalleryCell.Photo -> "screenshot-thumbnail"
+                    }
+                }
             ) { cell ->
                 when (cell) {
                     is GalleryCell.YearHeader -> {
@@ -484,7 +522,12 @@ private fun DatedScreenshotGrid(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 6.dp),
+                                .padding(
+                                    start = 16.dp,
+                                    top = if (cell.startsYear) 8.dp else 22.dp,
+                                    end = 16.dp,
+                                    bottom = 8.dp
+                                ),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -511,7 +554,7 @@ private fun DatedScreenshotGrid(
         }
         BallisticFastScrubber(
             gridState = gridState,
-            sections = timelineSections,
+            sections = galleryContent.timelineSections,
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(vertical = 16.dp)
@@ -519,104 +562,76 @@ private fun DatedScreenshotGrid(
     }
 }
 
-/**
- * Direction-aware look-ahead for a lazy grid. It intentionally warms only a
- * dozen upcoming thumbnails on disk: prefetching hundreds of decoded images
- * competes with the visible cells for CPU, I/O, and memory during a fling.
- */
-@Composable
-private fun PrefetchGalleryThumbnails(cells: List<GalleryCell>, gridState: LazyGridState) {
-    val context = LocalContext.current
-    val imageLoader = remember(context) { context.imageLoader }
-    val prefetchedUris = remember(cells) { mutableSetOf<String>() }
+/** Keeps transient feedback out of the scroll path and limits Undo to two seconds. */
+private suspend fun SnackbarHostState.showBriefSnackbar(
+    message: String,
+    actionLabel: String? = null
+): SnackbarResult = withTimeoutOrNull(BRIEF_SNACKBAR_MILLIS) {
+    showSnackbar(
+        message = message,
+        actionLabel = actionLabel,
+        duration = SnackbarDuration.Indefinite
+    )
+} ?: SnackbarResult.Dismissed
 
-    LaunchedEffect(cells, gridState, imageLoader) {
-        var previousFirstVisible = 0
-        snapshotFlow {
-            val visible = gridState.layoutInfo.visibleItemsInfo
-            val first = visible.minOfOrNull { it.index }
-            val last = visible.maxOfOrNull { it.index }
-            if (first == null || last == null) null else first to last
-        }
-            .filterNotNull()
-            .distinctUntilChanged()
-            .collect { (firstVisible, lastVisible) ->
-                val movingForward = firstVisible >= previousFirstVisible
-                previousFirstVisible = firstVisible
-                val start: Int
-                val end: Int
-                if (movingForward) {
-                    start = (lastVisible + 1).coerceAtMost(cells.lastIndex)
-                    end = (lastVisible + PREFETCH_AHEAD_CELLS).coerceAtMost(cells.lastIndex)
-                } else {
-                    start = (firstVisible - PREFETCH_AHEAD_CELLS).coerceAtLeast(0)
-                    end = (firstVisible - 1).coerceAtLeast(0)
-                }
-                if (start > end) return@collect
-                for (index in start..end) {
-                    val item = (cells[index] as? GalleryCell.Photo)?.item ?: continue
-                    if (prefetchedUris.add(item.uri.toString())) {
-                        imageLoader.enqueue(prefetchRequest(context, item))
-                    }
-                }
-            }
-    }
-}
-
-private fun prefetchRequest(context: android.content.Context, item: ScreenshotUiItem): ImageRequest {
-    val cacheKey = "pinshot:${item.uri}"
-    return ImageRequest.Builder(context.applicationContext)
-        .data(item.uri)
-        .size(PREFETCH_THUMBNAIL_SIZE_PX)
-        .diskCacheKey(cacheKey)
-        // Visible cells own the memory cache. Look-ahead only warms the disk
-        // cache so a fast fling cannot evict the thumbnails on screen.
-        .memoryCachePolicy(CachePolicy.DISABLED)
-        .diskCachePolicy(CachePolicy.ENABLED)
-        .build()
-}
-
-private fun List<ScreenshotUiItem>.toGalleryCells(): List<GalleryCell> {
+private fun List<ScreenshotUiItem>.toGalleryContent(): GalleryContent {
     val formatter = SimpleDateFormat("MMMM yyyy", Locale.getDefault())
     val monthFormatter = SimpleDateFormat("MMMM", Locale.getDefault())
-    val cells = mutableListOf<GalleryCell>()
+    val calendar = Calendar.getInstance()
+    val cells = ArrayList<GalleryCell>(size + (size / 12) + 1)
+    val monthHeaderIndexes = ArrayList<Int>()
     var currentYear: Int? = null
-    sortedByDescending { it.dateAdded }
-        .groupBy { it.monthKey() }
-        .forEach { (month, screenshots) ->
-            if (currentYear != month.year) {
+    var currentMonth: MonthKey? = null
+    var currentMonthHeaderIndex = -1
+    var currentMonthItemCount = 0
+
+    // MediaStore already supplies this list in DATE_ADDED-desc order. Avoid a
+    // second O(N log N) sort, a temporary group map, and one Calendar per image.
+    for (screenshot in this) {
+        calendar.timeInMillis = screenshot.dateAdded
+        val month = MonthKey(calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH))
+        if (month != currentMonth) {
+            if (currentMonthHeaderIndex >= 0) {
+                val previousHeader = cells[currentMonthHeaderIndex] as GalleryCell.MonthHeader
+                cells[currentMonthHeaderIndex] = previousHeader.copy(itemCount = currentMonthItemCount)
+            }
+            currentMonth = month
+            val startsYear = currentYear != month.year
+            if (startsYear) {
                 currentYear = month.year
                 cells += GalleryCell.YearHeader(month.year, "year-${month.year}")
             }
-            cells += GalleryCell.MonthHeader(
-                title = formatter.format(Date(screenshots.first().dateAdded)),
-                monthLabel = monthFormatter.format(Date(screenshots.first().dateAdded)),
+            val monthHeader = GalleryCell.MonthHeader(
+                title = formatter.format(calendar.time),
+                monthLabel = monthFormatter.format(calendar.time),
                 year = month.year,
                 month = month.month,
-                itemCount = screenshots.size,
+                itemCount = 0,
+                startsYear = startsYear,
                 key = "month-${month.year}-${month.month}"
             )
-            cells += screenshots.map(GalleryCell::Photo)
+            currentMonthHeaderIndex = cells.size
+            monthHeaderIndexes += currentMonthHeaderIndex
+            currentMonthItemCount = 0
+            cells += monthHeader
         }
-    return cells
-}
-
-private fun ScreenshotUiItem.monthKey(): MonthKey {
-    val calendar = Calendar.getInstance().apply { timeInMillis = dateAdded }
-    return MonthKey(calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH))
-}
-
-private fun List<GalleryCell>.toTimelineSections(): List<TimelineSection> {
-    val headers = mapIndexedNotNull { index, cell ->
-        (cell as? GalleryCell.MonthHeader)?.let { index to it }
+        cells += GalleryCell.Photo(screenshot)
+        currentMonthItemCount++
     }
-    if (headers.isEmpty()) return emptyList()
 
-    val newestMonth = headers.first().second.year * 12 + headers.first().second.month
-    val oldestMonth = headers.last().second.year * 12 + headers.last().second.month
+    if (currentMonthHeaderIndex >= 0) {
+        val lastHeader = cells[currentMonthHeaderIndex] as GalleryCell.MonthHeader
+        cells[currentMonthHeaderIndex] = lastHeader.copy(itemCount = currentMonthItemCount)
+    }
+    if (monthHeaderIndexes.isEmpty()) return GalleryContent(cells, emptyList())
+
+    val firstHeader = cells[monthHeaderIndexes.first()] as GalleryCell.MonthHeader
+    val lastHeader = cells[monthHeaderIndexes.last()] as GalleryCell.MonthHeader
+    val newestMonth = firstHeader.year * 12 + firstHeader.month
+    val oldestMonth = lastHeader.year * 12 + lastHeader.month
     val monthRange = (newestMonth - oldestMonth).coerceAtLeast(1)
-
-    return headers.mapIndexed { headerIndex, (itemIndex, header) ->
+    val timelineSections = monthHeaderIndexes.map { itemIndex ->
+        val header = cells[itemIndex] as GalleryCell.MonthHeader
         val monthValue = header.year * 12 + header.month
         TimelineSection(
             firstItemIndex = itemIndex,
@@ -627,6 +642,7 @@ private fun List<GalleryCell>.toTimelineSections(): List<TimelineSection> {
             yearLabel = header.year.toString()
         )
     }
+    return GalleryContent(cells, timelineSections)
 }
 
 @Composable
@@ -642,7 +658,7 @@ private fun ScreenshotThumbnail(
             .aspectRatio(1f)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
-        ScreenshotImage(item, ContentScale.Crop, Modifier.fillMaxSize())
+        GalleryThumbnailImage(item, Modifier.fillMaxSize())
         if (selected) Surface(
             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.36f),
             modifier = Modifier.fillMaxSize()
@@ -663,6 +679,78 @@ private fun ScreenshotThumbnail(
                 )
             }
         }
+    }
+}
+
+/**
+ * Android's MediaProvider owns a native thumbnail store. Using it directly for
+ * the scrolling grid avoids reopening and sampling each full screenshot in
+ * Coil while a frame is being produced.
+ */
+@Composable
+private fun GalleryThumbnailImage(item: ScreenshotUiItem, modifier: Modifier = Modifier) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+        ScreenshotImage(item, ContentScale.Crop, modifier)
+        return
+    }
+
+    val context = LocalContext.current.applicationContext
+    val thumbnailSizePx = remember(context) {
+        (context.resources.displayMetrics.widthPixels / 3)
+            .coerceIn(MIN_GALLERY_THUMBNAIL_SIZE_PX, MAX_GALLERY_THUMBNAIL_SIZE_PX)
+    }
+    val cacheKey = remember(item.uri, item.dateAdded, thumbnailSizePx) {
+        "${item.uri}:${item.dateAdded}:$thumbnailSizePx"
+    }
+    val bitmap by produceState<Bitmap?>(
+        initialValue = GalleryThumbnailCache.get(cacheKey),
+        key1 = cacheKey
+    ) {
+        if (value != null) return@produceState
+        val cancellation = CancellationSignal()
+        try {
+            val thumbnail = withContext(Dispatchers.IO) {
+                context.contentResolver.loadThumbnail(
+                    item.uri,
+                    Size(thumbnailSizePx, thumbnailSizePx),
+                    cancellation
+                )
+            }
+            GalleryThumbnailCache.put(cacheKey, thumbnail)
+            value = thumbnail
+        } catch (_: Exception) {
+            // A transient provider failure falls back to the neutral cell; it
+            // never blocks, crashes, or starts a full-resolution decode here.
+        } finally {
+            cancellation.cancel()
+        }
+    }
+
+    val thumbnail = bitmap
+    if (thumbnail != null) {
+        Image(
+            bitmap = thumbnail.asImageBitmap(),
+            contentDescription = item.displayName,
+            contentScale = ContentScale.Crop,
+            modifier = modifier
+        )
+    } else {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+            modifier = modifier
+        ) {}
+    }
+}
+
+private object GalleryThumbnailCache {
+    private val cache = object : LruCache<String, Bitmap>(GALLERY_THUMBNAIL_CACHE_BYTES) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
+    }
+
+    fun get(key: String): Bitmap? = cache.get(key)
+
+    fun put(key: String, bitmap: Bitmap) {
+        cache.put(key, bitmap)
     }
 }
 
@@ -819,7 +907,10 @@ private fun ViewerScreen(
                 actions = {
                     if (isTrash) {
                         IconButton(onClick = onRestore) {
-                            Icon(Icons.Filled.Restore, contentDescription = "Restore")
+                            Icon(
+                                Icons.Filled.RestoreFromTrash,
+                                contentDescription = "Restore to Screenshots"
+                            )
                         }
                     } else {
                         IconButton(onClick = onMoveToExpiring) {
@@ -863,7 +954,7 @@ fun EmptyContent(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(32.dp),
+            .padding(horizontal = 24.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -873,31 +964,35 @@ fun EmptyContent(
             Surface(
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.surfaceContainer,
-                modifier = Modifier.size(72.dp)
+                modifier = Modifier.size(56.dp)
             ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(20.dp)
+                    modifier = Modifier.padding(16.dp)
                 )
             }
         }
-        Spacer(Modifier.height(20.dp))
-        Text(title, style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(14.dp))
+        Text(title, style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(4.dp))
         Text(
             text = body,
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
         )
         if (action != null) {
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(16.dp))
             action()
         }
     }
 }
 
+private const val BRIEF_SNACKBAR_MILLIS = 2_000L
+private const val MIN_GALLERY_THUMBNAIL_SIZE_PX = 160
+private const val MAX_GALLERY_THUMBNAIL_SIZE_PX = 512
+private const val GALLERY_THUMBNAIL_CACHE_BYTES = 32 * 1024 * 1024
 private const val EXPIRATION_MILLIS = 24 * 60 * 60 * 1_000L
