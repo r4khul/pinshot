@@ -12,7 +12,10 @@ import com.escapebranch.pinshot.data.MediaTrashResult
 import com.escapebranch.pinshot.data.ScreenshotItemEntity
 import com.escapebranch.pinshot.data.ScreenshotRepository
 import com.escapebranch.pinshot.notifications.PinshotNotifications
+import com.escapebranch.pinshot.notifications.ExpirationScheduler
+import com.escapebranch.pinshot.notifications.CaptureNotificationTracker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -55,9 +58,18 @@ data class MediaWriteConsentRequest(
     val items: List<ScreenshotUiItem> = listOf(item)
 )
 
+sealed interface MediaSnackbarEvent {
+    /** Every item here completed the Android trash transition successfully. */
+    data class MovedToTrash(val items: List<ScreenshotUiItem>) : MediaSnackbarEvent {
+        val count: Int get() = items.size
+    }
+    data class Recovered(val count: Int) : MediaSnackbarEvent
+}
+
 class PinshotViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ScreenshotRepository(application)
     private val trashManager = MediaTrashManager(application)
+    private val captureNotificationTracker = CaptureNotificationTracker(application)
     private val activeMedia = MutableStateFlow<List<MediaStoreScreenshot>>(emptyList())
     private val trashedMedia = MutableStateFlow<List<MediaStoreScreenshot>>(emptyList())
     private val now = MutableStateFlow(System.currentTimeMillis())
@@ -66,11 +78,16 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
     private val _needsManageMediaPermission = MutableStateFlow(false)
     private val _silentCleanupEnabled = MutableStateFlow(trashManager.canManageMedia())
     private val _writeConsentRequest = MutableStateFlow<MediaWriteConsentRequest?>(null)
-    private val _trashEvents = MutableSharedFlow<ScreenshotUiItem>(extraBufferCapacity = 1)
+    private val _mediaSnackbarEvents = MutableSharedFlow<MediaSnackbarEvent>(extraBufferCapacity = 1)
     private val _hasPendingMediaMutation = MutableStateFlow(false)
     private val consentQueue = ArrayDeque<MediaWriteConsentRequest>()
     private val inFlightUris = mutableSetOf<String>()
     private val refreshMutex = Mutex()
+    private val pendingTrashFeedback = mutableListOf<ScreenshotUiItem>()
+    private var pendingRecoveryCount = 0
+    private var trashFeedbackJob: Job? = null
+    private var recoveryFeedbackJob: Job? = null
+    private var mediaStoreRefreshJob: Job? = null
 
     val isLoading: StateFlow<Boolean> = _isLoading
     val message: StateFlow<String?> = _message
@@ -78,16 +95,16 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
     val silentCleanupEnabled: StateFlow<Boolean> = _silentCleanupEnabled
     val writeConsentRequest: StateFlow<MediaWriteConsentRequest?> = _writeConsentRequest
     val hasPendingMediaMutation: StateFlow<Boolean> = _hasPendingMediaMutation
-    val trashEvents = _trashEvents.asSharedFlow()
+    val mediaSnackbarEvents = _mediaSnackbarEvents.asSharedFlow()
 
-    private val activeItems = combine(activeMedia, repository.observeMetadata()) { media, entities ->
+    private val activeItems = combine(activeMedia, repository.observeActiveMetadata()) { media, entities ->
         media.toUiItems(entities)
     }
     val screenshots = activeItems.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val expiring = combine(activeItems, now) { items, currentTime ->
         items.filter { !it.isPinned && currentTime < it.expirationTimestamp }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val trash = combine(trashedMedia, repository.observeMetadata()) { media, entities ->
+    val trash = combine(trashedMedia, repository.observeTrashedMetadata()) { media, entities ->
         media.toUiItems(entities)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -102,11 +119,31 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
 
     fun refresh() = viewModelScope.launch { refreshNow() }
 
+    /** Collapses bursty MediaStore observer callbacks into one refresh. */
+    fun onMediaStoreChanged() {
+        mediaStoreRefreshJob?.cancel()
+        mediaStoreRefreshJob = viewModelScope.launch {
+            delay(MEDIASTORE_REFRESH_DEBOUNCE_MILLIS)
+            refreshNow()
+        }
+    }
+
     private suspend fun refreshNow() = refreshMutex.withLock {
         _isLoading.value = true
         try {
             val (active, trashed) = withContext(Dispatchers.IO) {
-                val current = repository.loadScreenshots()
+                val discovery = repository.discoverScreenshots()
+                val current = discovery.screenshots
+                // A screenshot found while the app is open gets its targeted
+                // one-hour warning immediately, not only on the next worker run.
+                ExpirationScheduler.scheduleWarnings(
+                    getApplication(),
+                    repository.metadata(),
+                    System.currentTimeMillis()
+                )
+                if (captureNotificationTracker.shouldNotify(discovery.newlyTracked.size)) {
+                    PinshotNotifications.postCaptureDetected(getApplication(), discovery.newlyTracked.size)
+                }
                 current to repository.loadVerifiedTrashedScreenshots()
             }
             activeMedia.value = active
@@ -139,7 +176,16 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
 
     fun restore(item: ScreenshotUiItem) = beginTrashTransition(item, trashed = false)
 
+    fun moveToTrash(items: List<ScreenshotUiItem>) = beginBatchTrashTransition(items, trashed = true)
+
+    fun restore(items: List<ScreenshotUiItem>) = beginBatchTrashTransition(items, trashed = false)
+
     fun undoTrash(item: ScreenshotUiItem) = restore(item)
+
+    /** Undo is offered only for completed trash moves, never for recovery. */
+    fun undoTrash(items: List<ScreenshotUiItem>) {
+        restore(items)
+    }
 
     fun deletePermanently(item: ScreenshotUiItem) {
         if (!startMutation(item)) return
@@ -233,7 +279,7 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             try {
                 if (!granted) {
-                    _message.value = "The system action was cancelled"
+                    reconcileCancelledSystemRequest(request)
                 } else if (request.retryDirectUpdateAfterResult) {
                     // RecoverableSecurityException grants write access; Android
                     // does not perform the original update/delete automatically.
@@ -246,12 +292,19 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
                 } else if (request.isPermanentDelete) {
                     confirmCompletedPermanentDeletion(request.items)
                 } else {
-                    val recorded = withContext(Dispatchers.IO) {
-                        repository.recordCompletedSystemTrashRequest(request.item.uri, request.trashed)
+                    val completedUris = withContext(Dispatchers.IO) {
+                        repository.recordCompletedSystemTrashRequest(
+                            request.items.map { it.uri },
+                            request.trashed
+                        )
                     }
-                    if (recorded) {
+                    if (completedUris.isNotEmpty()) {
                         refreshNow()
-                        if (request.trashed) _trashEvents.emit(request.item)
+                        val completedItems = request.items.filter { it.uri in completedUris }
+                        completedItems.forEach { emitTransitionEvent(it, request.trashed) }
+                        if (completedItems.size != request.items.size) {
+                            _message.value = "Some screenshots changed before Android completed the action"
+                        }
                     } else {
                         _message.value = "The screenshot changed before Android completed the trash action"
                     }
@@ -345,13 +398,63 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /** Validates every selected URI, then sends Android one atomic batch action. */
+    private fun beginBatchTrashTransition(items: List<ScreenshotUiItem>, trashed: Boolean) {
+        val candidates = items.distinctBy { it.uri.toString() }
+        if (candidates.size <= 1) {
+            candidates.singleOrNull()?.let { beginTrashTransition(it, trashed) }
+            return
+        }
+        val started = candidates.filter(::startMutation)
+        if (started.isEmpty()) return
+
+        viewModelScope.launch {
+            val verified = withContext(Dispatchers.IO) {
+                started.filter { item ->
+                    if (trashed) {
+                        repository.isVerifiedActiveScreenshot(item.uri)
+                    } else {
+                        repository.isVerifiedTrashedScreenshot(item.uri)
+                    }
+                }
+            }
+            finishMutations(started - verified.toSet())
+            if (verified.isEmpty()) {
+                _message.value = "None of the selected screenshots can be changed"
+                refreshNow()
+                return@launch
+            }
+
+            when (val result = withContext(Dispatchers.IO) {
+                trashManager.createTrashRequest(verified.map { it.uri }, trashed)
+            }) {
+                is MediaTrashResult.SystemTrashRequest -> enqueueConsent(
+                    MediaWriteConsentRequest(
+                        intentSender = result.intentSender,
+                        item = verified.first(),
+                        items = verified,
+                        trashed = trashed
+                    )
+                )
+                MediaTrashResult.Unsupported -> {
+                    _message.value = "System trash requires Android 11 or later"
+                    finishMutations(verified)
+                }
+                else -> {
+                    _message.value = "Android could not update the selected screenshots in system trash"
+                    finishMutations(verified)
+                }
+            }
+        }
+    }
+
     private suspend fun commitTrashTransition(item: ScreenshotUiItem, trashed: Boolean) {
         val confirmed = withContext(Dispatchers.IO) {
             repository.confirmAndRecordTrashState(item.uri, trashed)
         }
         if (confirmed) {
             refreshNow()
-            if (trashed) _trashEvents.emit(item)
+            emitTransitionEvent(item, trashed)
         } else {
             _message.value = "Android did not complete the system trash action"
             refreshNow()
@@ -380,8 +483,51 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
     private suspend fun confirmCompletedPermanentDeletion(items: List<ScreenshotUiItem>) {
         // Android guarantees a createDeleteRequest result is delivered only
         // after every URI in that request has been processed successfully.
-        withContext(Dispatchers.IO) { items.forEach { repository.purgeMissing(it.uri) } }
+        withContext(Dispatchers.IO) { repository.purgeMissing(items.map { it.uri }) }
         refreshNow()
+    }
+
+    /**
+     * A few MediaProvider implementations return RESULT_CANCELED even after a
+     * request has changed media. Reconcile only exact, verified outcomes so a
+     * misleading result code cannot leave the UI or Room state stale.
+     */
+    private suspend fun reconcileCancelledSystemRequest(request: MediaWriteConsentRequest) {
+        if (request.retryDirectUpdateAfterResult) {
+            _message.value = "The system action was cancelled"
+            return
+        }
+
+        if (request.isPermanentDelete) {
+            val deletedItems = withContext(Dispatchers.IO) {
+                request.items.filter { repository.isMissing(it.uri) }
+            }
+            if (deletedItems.isEmpty()) {
+                _message.value = "The system action was cancelled"
+                return
+            }
+            withContext(Dispatchers.IO) { repository.purgeMissing(deletedItems.map { it.uri }) }
+            refreshNow()
+            if (deletedItems.size != request.items.size) {
+                _message.value = "Android completed permanent deletion for ${deletedItems.size} of ${request.items.size} screenshots"
+            }
+            return
+        }
+
+        val completedItems = withContext(Dispatchers.IO) {
+            request.items.filter { item ->
+                repository.confirmAndRecordTrashState(item.uri, request.trashed)
+            }
+        }
+        if (completedItems.isEmpty()) {
+            _message.value = "The system action was cancelled"
+            return
+        }
+        refreshNow()
+        completedItems.forEach { emitTransitionEvent(it, request.trashed) }
+        if (completedItems.size != request.items.size) {
+            _message.value = "Android completed the action for ${completedItems.size} of ${request.items.size} screenshots"
+        }
     }
 
     private fun startMutation(item: ScreenshotUiItem): Boolean {
@@ -408,6 +554,34 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
         _writeConsentRequest.value = if (consentQueue.isEmpty()) null else consentQueue.removeFirst()
     }
 
+    private suspend fun emitTransitionEvent(item: ScreenshotUiItem, trashed: Boolean) {
+        if (trashed) {
+            pendingTrashFeedback += item
+            trashFeedbackJob?.cancel()
+            trashFeedbackJob = viewModelScope.launch {
+                delay(FEEDBACK_COALESCE_MILLIS)
+                val completedItems = pendingTrashFeedback.toList()
+                pendingTrashFeedback.clear()
+                trashFeedbackJob = null
+                if (completedItems.isNotEmpty()) {
+                    _mediaSnackbarEvents.emit(MediaSnackbarEvent.MovedToTrash(completedItems))
+                }
+            }
+        } else {
+            pendingRecoveryCount++
+            recoveryFeedbackJob?.cancel()
+            recoveryFeedbackJob = viewModelScope.launch {
+                delay(FEEDBACK_COALESCE_MILLIS)
+                val recoveredCount = pendingRecoveryCount
+                pendingRecoveryCount = 0
+                recoveryFeedbackJob = null
+                if (recoveredCount > 0) {
+                    _mediaSnackbarEvents.emit(MediaSnackbarEvent.Recovered(recoveredCount))
+                }
+            }
+        }
+    }
+
     private fun List<MediaStoreScreenshot>.toUiItems(entities: List<ScreenshotItemEntity>): List<ScreenshotUiItem> {
         val metadata = entities.associateBy { it.uriString }
         return map { image ->
@@ -425,6 +599,8 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private companion object {
+        const val MEDIASTORE_REFRESH_DEBOUNCE_MILLIS = 500L
+        const val FEEDBACK_COALESCE_MILLIS = 200L
         val EXPIRATION_MILLIS = TimeUnit.HOURS.toMillis(24)
     }
 }
