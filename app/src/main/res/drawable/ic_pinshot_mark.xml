@@ -3,6 +3,7 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Soft, curved motion trails keep the mark energetic without visual noise. -->
     <path
         android:strokeColor="#FFFFFFFF"
         android:strokeAlpha="0.55"
