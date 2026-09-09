@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/logo.png" width="128" height="128" alt="Pinshot Logo" />
+  <img src="assets/logo.svg" width="128" height="128" alt="Pinshot Logo" />
   <h1>Pinshot</h1>
   <p>Automatic screenshot cleanup and ephemeral media management for Android</p>
 </div>
