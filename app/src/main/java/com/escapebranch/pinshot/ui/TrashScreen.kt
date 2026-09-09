@@ -9,11 +9,14 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.RestoreFromTrash
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -58,7 +61,11 @@ fun TrashScreen(
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
-        items(items, key = { it.uri.toString() }) { item ->
+        items(
+            items = items,
+            key = { it.uri.toString() },
+            contentType = { "trash-thumbnail" }
+        ) { item ->
             TrashThumbnail(
                 item = item,
                 selected = item.uri.toString() in selectedUris,
@@ -105,6 +112,21 @@ private fun TrashThumbnail(
             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.36f),
             modifier = Modifier.fillMaxSize()
         ) {}
+        // The thumbnail remains tappable for the existing quick-restore
+        // behavior. This dedicated control makes the destination explicit.
+        FilledTonalIconButton(
+            onClick = onRestore,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(4.dp)
+                .size(36.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.RestoreFromTrash,
+                contentDescription = "Restore ${item.displayName} to Screenshots",
+                modifier = Modifier.size(18.dp)
+            )
+        }
         Surface(
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             shape = MaterialTheme.shapes.small,
