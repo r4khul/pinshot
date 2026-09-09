@@ -3,9 +3,13 @@ package com.escapebranch.pinshot.ui
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.CancellationSignal
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
 import android.util.LruCache
 import android.util.Size
 import androidx.activity.compose.BackHandler
@@ -15,8 +19,13 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -25,6 +34,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -70,12 +80,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -85,12 +97,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
@@ -103,10 +118,12 @@ import java.util.Calendar
 import java.util.Locale
 import com.escapebranch.pinshot.data.ManageMediaPermissionContract
 import com.escapebranch.pinshot.notifications.NotificationDestinations
+import com.escapebranch.pinshot.R
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.launch
 
 private enum class PinshotTab(val label: String) {
     Screenshots("Screenshots"),
@@ -120,6 +137,9 @@ private data class GalleryContent(
     val cells: List<GalleryCell>,
     val timelineSections: List<TimelineSection>
 )
+
+private const val ONBOARDING_PREFERENCES = "pinshot.onboarding"
+private const val ONBOARDING_COMPLETE_KEY = "complete"
 
 private sealed interface GalleryCell {
     val key: String
@@ -158,11 +178,25 @@ fun MainScreen(
     var hasPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED)
     }
+    var hasNotificationPermission by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    var onboardingComplete by remember {
+        mutableStateOf(
+            context.getSharedPreferences(ONBOARDING_PREFERENCES, android.content.Context.MODE_PRIVATE)
+                .getBoolean(ONBOARDING_COMPLETE_KEY, false)
+        )
+    }
     var selectedTab by rememberSaveable { mutableStateOf(PinshotTab.Screenshots) }
     var viewer by remember { mutableStateOf<ViewerRequest?>(null) }
     val selectedItems = remember { mutableStateMapOf<String, ScreenshotUiItem>() }
     var permanentDeleteCandidates by remember { mutableStateOf<List<ScreenshotUiItem>>(emptyList()) }
     val screenshotsGridState = rememberLazyGridState()
+    val pagerState = rememberPagerState(initialPage = selectedTab.ordinal) { PinshotTab.entries.size }
+    val pagerScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val message by viewModel.message.collectAsStateWithLifecycle()
     val needsManageMediaPermission by viewModel.needsManageMediaPermission.collectAsStateWithLifecycle()
@@ -182,7 +216,9 @@ fun MainScreen(
         hasPermission = granted
         if (granted) viewModel.refresh()
     }
-    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        hasNotificationPermission = granted
+    }
     val manageMediaLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { viewModel.onManageMediaSettingsReturned() }
@@ -195,10 +231,21 @@ fun MainScreen(
     LaunchedEffect(hasPermission) {
         if (hasPermission) {
             viewModel.refresh()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-            ) notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+    DisposableEffect(context, hasPermission, viewModel) {
+        if (!hasPermission) return@DisposableEffect onDispose {}
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                viewModel.onMediaStoreChanged()
+            }
+        }
+        context.contentResolver.registerContentObserver(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            true,
+            observer
+        )
+        onDispose { context.contentResolver.unregisterContentObserver(observer) }
     }
     LaunchedEffect(message) {
         message?.let {
@@ -245,12 +292,60 @@ fun MainScreen(
             else -> PinshotTab.Screenshots
         }
     }
+    LaunchedEffect(pagerState.currentPage) {
+        val pageTab = PinshotTab.entries[pagerState.currentPage]
+        if (selectedTab != pageTab) {
+            selectedItems.clear()
+            selectedTab = pageTab
+        }
+    }
+    LaunchedEffect(selectedTab) {
+        if (pagerState.currentPage != selectedTab.ordinal) {
+            pagerState.animateScrollToPage(selectedTab.ordinal)
+        }
+    }
+    if (!onboardingComplete) {
+        OnboardingScreen(
+            photosGranted = hasPermission,
+            notificationsGranted = hasNotificationPermission,
+            silentCleanupGranted = silentCleanupEnabled,
+            onGrantPhotos = { permissionLauncher.launch(permission) },
+            onGrantNotifications = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
+            onEnableSilentCleanup = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    manageMediaLauncher.launch(ManageMediaPermissionContract.settingsIntent(context))
+                }
+            },
+            onContinue = {
+                context.getSharedPreferences(ONBOARDING_PREFERENCES, android.content.Context.MODE_PRIVATE).edit {
+                    putBoolean(ONBOARDING_COMPLETE_KEY, true)
+                }
+                onboardingComplete = true
+            }
+        )
+        return
+    }
     viewer?.let { request ->
         ViewerScreen(
             item = request.item,
             isTrash = request.isTrash,
             onBack = { viewer = null },
-            onMoveToExpiring = { viewModel.moveToExpiring(request.item) },
+            onMoveToExpiring = {
+                viewModel.moveToExpiring(request.item)
+                viewer = null
+            },
+            onPin = {
+                viewModel.togglePin(request.item)
+                viewer = null
+            },
+            onTrash = {
+                viewModel.moveToTrash(request.item)
+                viewer = null
+            },
             onRestore = {
                 viewModel.restore(request.item)
                 viewer = null
@@ -377,7 +472,11 @@ fun MainScreen(
                 PinshotTab.entries.forEach { tab ->
                     NavigationBarItem(
                         selected = tab == selectedTab,
-                        onClick = { selectedItems.clear(); selectedTab = tab },
+                        onClick = {
+                            selectedItems.clear()
+                            selectedTab = tab
+                            pagerScope.launch { pagerState.animateScrollToPage(tab.ordinal) }
+                        },
                         icon = {
                             Icon(
                                 imageVector = when (tab) {
@@ -402,32 +501,203 @@ fun MainScreen(
                 modifier = Modifier.padding(padding)
             )
         } else {
-            when (selectedTab) {
-                PinshotTab.Screenshots -> GalleryTab(
-                    items = screenshotItems,
-                    isLoading = viewModel.isLoading.collectAsStateWithLifecycle().value,
-                    gridState = screenshotsGridState,
-                    onOpen = { viewer = ViewerRequest(it, isTrash = false) },
-                    selectedUris = selectedItems.keys,
-                    onToggleSelection = { item -> item.uri.toString().let { if (selectedItems.containsKey(it)) selectedItems.remove(it) else selectedItems[it] = item } },
-                    modifier = Modifier.padding(padding)
+            HorizontalPager(
+                state = pagerState,
+                userScrollEnabled = !hasPendingMediaMutation,
+                modifier = Modifier.padding(padding)
+            ) { page ->
+                when (PinshotTab.entries[page]) {
+                    PinshotTab.Screenshots -> GalleryTab(
+                        items = screenshotItems,
+                        isLoading = viewModel.isLoading.collectAsStateWithLifecycle().value,
+                        gridState = screenshotsGridState,
+                        onOpen = { viewer = ViewerRequest(it, isTrash = false) },
+                        selectedUris = selectedItems.keys,
+                        onToggleSelection = { item -> item.uri.toString().let { if (selectedItems.containsKey(it)) selectedItems.remove(it) else selectedItems[it] = item } },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    PinshotTab.Expiring -> ExpiringTab(
+                        items = expiringItems,
+                        onOpen = { viewer = ViewerRequest(it, isTrash = false) },
+                        onPin = viewModel::togglePin,
+                        onTrash = viewModel::moveToTrash,
+                        selectedUris = selectedItems.keys,
+                        onToggleSelection = { item -> item.uri.toString().let { if (selectedItems.containsKey(it)) selectedItems.remove(it) else selectedItems[it] = item } },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    PinshotTab.Trash -> TrashScreen(
+                        items = trashItems,
+                        isLoading = viewModel.isLoading.collectAsStateWithLifecycle().value,
+                        onRestore = viewModel::restore,
+                        selectedUris = selectedItems.keys,
+                        onToggleSelection = { item -> item.uri.toString().let { if (selectedItems.containsKey(it)) selectedItems.remove(it) else selectedItems[it] = item } },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OnboardingScreen(
+    photosGranted: Boolean,
+    notificationsGranted: Boolean,
+    silentCleanupGranted: Boolean,
+    onGrantPhotos: () -> Unit,
+    onGrantNotifications: () -> Unit,
+    onEnableSilentCleanup: () -> Unit,
+    onContinue: () -> Unit
+) {
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // On ordinary screens the onboarding story is truly centered;
+                    // short screens retain scrolling instead of clipping controls.
+                    .heightIn(min = maxHeight)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp, vertical = 28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(96.dp)
+            ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_pinshot_mark),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.padding(22.dp)
                 )
-                PinshotTab.Expiring -> ExpiringTab(
-                    items = expiringItems,
-                    onOpen = { viewer = ViewerRequest(it, isTrash = false) },
-                    onPin = viewModel::togglePin,
-                    onTrash = viewModel::moveToTrash,
-                    selectedUris = selectedItems.keys,
-                    onToggleSelection = { item -> item.uri.toString().let { if (selectedItems.containsKey(it)) selectedItems.remove(it) else selectedItems[it] = item } },
-                    modifier = Modifier.padding(padding)
+            }
+            Spacer(Modifier.height(20.dp))
+            Text("Pinshot", style = MaterialTheme.typography.displaySmall)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Screenshots that clean themselves.",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Keep it, or let it go in 24 hours.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(28.dp))
+            PermissionCard(
+                icon = Icons.Filled.Image,
+                title = "Photos",
+                body = "Find your screenshots.",
+                granted = photosGranted,
+                actionLabel = "Allow",
+                onAction = onGrantPhotos
+            )
+            Spacer(Modifier.height(10.dp))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                PermissionCard(
+                    icon = Icons.Filled.HourglassEmpty,
+                    title = "Alerts",
+                    body = "Warn you before expiry.",
+                    granted = notificationsGranted,
+                    actionLabel = "Allow",
+                    onAction = onGrantNotifications
                 )
-                PinshotTab.Trash -> TrashScreen(
-                    items = trashItems,
-                    isLoading = viewModel.isLoading.collectAsStateWithLifecycle().value,
-                    onRestore = viewModel::restore,
-                    selectedUris = selectedItems.keys,
-                    onToggleSelection = { item -> item.uri.toString().let { if (selectedItems.containsKey(it)) selectedItems.remove(it) else selectedItems[it] = item } },
-                    modifier = Modifier.padding(padding)
+                Spacer(Modifier.height(10.dp))
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                PermissionCard(
+                    icon = Icons.Filled.Settings,
+                    title = "Silent cleanup",
+                    body = "Trash expired shots without repeat prompts.",
+                    granted = silentCleanupGranted,
+                    actionLabel = "Enable",
+                    onAction = onEnableSilentCleanup,
+                    optional = true
+                )
+                Spacer(Modifier.height(20.dp))
+            } else {
+                Spacer(Modifier.height(20.dp))
+            }
+            Button(
+                onClick = onContinue,
+                enabled = photosGranted,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Start Pinshot")
+            }
+            if (!photosGranted) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Photo access is needed to continue.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionCard(
+    icon: ImageVector,
+    title: String,
+    body: String,
+    granted: Boolean,
+    actionLabel: String,
+    onAction: () -> Unit,
+    optional: Boolean = false
+) {
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = if (granted) {
+            MaterialTheme.colorScheme.secondaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHigh
+        },
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = if (granted) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.surface,
+                modifier = Modifier.size(44.dp)
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (granted) MaterialTheme.colorScheme.onSecondary else MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(10.dp)
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    body,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            TextButton(onClick = onAction, enabled = !granted) {
+                Text(
+                    when {
+                        granted -> "Done"
+                        optional -> actionLabel
+                        else -> actionLabel
+                    }
                 )
             }
         }
@@ -885,6 +1155,8 @@ private fun ViewerScreen(
     isTrash: Boolean,
     onBack: () -> Unit,
     onMoveToExpiring: () -> Unit,
+    onPin: () -> Unit,
+    onTrash: () -> Unit,
     onRestore: () -> Unit
 ) {
     BackHandler(onBack = onBack)
@@ -913,8 +1185,16 @@ private fun ViewerScreen(
                             )
                         }
                     } else {
-                        IconButton(onClick = onMoveToExpiring) {
-                        Icon(Icons.Filled.HourglassEmpty, contentDescription = "Move to Expiring")
+                        // A pinned screenshot can be given its 24-hour expiry;
+                        // an already-expiring screenshot gets the inverse action.
+                        IconButton(onClick = if (item.isPinned) onMoveToExpiring else onPin) {
+                            Icon(
+                                if (item.isPinned) Icons.Filled.HourglassEmpty else Icons.Filled.PushPin,
+                                contentDescription = if (item.isPinned) "Move to Expiring" else "Pin and keep"
+                            )
+                        }
+                        IconButton(onClick = onTrash) {
+                            Icon(Icons.Filled.DeleteOutline, contentDescription = "Move to trash")
                         }
                     }
                 }
