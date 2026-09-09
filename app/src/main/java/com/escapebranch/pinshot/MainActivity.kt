@@ -4,44 +4,39 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import com.escapebranch.pinshot.notifications.ExpirationScheduler
+import com.escapebranch.pinshot.notifications.NotificationDestinations
+import com.escapebranch.pinshot.notifications.PinshotNotifications
+import com.escapebranch.pinshot.ui.MainScreen
 import com.escapebranch.pinshot.ui.theme.PinshotTheme
 
 class MainActivity : ComponentActivity() {
+    private var notificationDestination by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         super.onCreate(savedInstanceState)
+        notificationDestination = intent.destination()
+        PinshotNotifications.ensureChannel(this)
+        ExpirationScheduler.schedule(this)
         enableEdgeToEdge()
         setContent {
             PinshotTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    Greeting(
-                        name = "Android",
-                        modifier = Modifier.padding(innerPadding)
-                    )
-                }
+                MainScreen(initialDestination = notificationDestination)
             }
         }
     }
-}
 
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name!",
-        modifier = modifier
-    )
-}
-
-@Preview(showBackground = true)
-@Composable
-fun GreetingPreview() {
-    PinshotTheme {
-        Greeting("Android")
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        notificationDestination = intent.destination()
     }
+
+    private fun android.content.Intent.destination(): String? =
+        getStringExtra(NotificationDestinations.EXTRA_DESTINATION)
 }
