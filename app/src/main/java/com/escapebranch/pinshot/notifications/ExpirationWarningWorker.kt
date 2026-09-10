@@ -21,15 +21,10 @@ class ExpirationWarningWorker(appContext: Context, params: WorkerParameters) : C
         // reminder was enqueued. Never notify about a reused MediaStore ID.
         if (!repository.isVerifiedActiveScreenshot(uri)) return Result.success()
 
-        val name = repository.displayNames(listOf(uriString)).firstOrNull()
         PinshotNotifications.postWarning(
             applicationContext,
             uriStrings = listOf(uriString),
-            body = if (name == null) {
-                "Tap to review before it moves to trash."
-            } else {
-                "$name expires soon. Tap to review."
-            }
+            body = "Choose whether to keep it before automatic cleanup."
         )
         return Result.success()
     }

@@ -28,7 +28,10 @@ class ExpirationWorker(appContext: Context, params: WorkerParameters) : Coroutin
         // process is gone. The first scan establishes a quiet baseline, while
         // later scans can confirm screenshots captured while Pinshot was closed.
         if (CaptureNotificationTracker(applicationContext).shouldNotify(discovery.newlyTracked.size)) {
-            PinshotNotifications.postCaptureDetected(applicationContext, discovery.newlyTracked.size)
+            PinshotNotifications.postCaptureDetected(
+                applicationContext,
+                discovery.newlyTracked.map { it.uri.toString() }
+            )
         }
         // Schedule exact-item reminders after every discovery pass. This also
         // makes screenshots taken while Pinshot was closed eligible for a
@@ -46,7 +49,7 @@ class ExpirationWorker(appContext: Context, params: WorkerParameters) : Coroutin
         // A worker must never attempt to surface an activity-result prompt.
         if (!trashManager.canManageMedia()) return Result.success()
 
-        var trashedCount = 0
+        val trashedUriStrings = mutableListOf<String>()
         var shouldRetry = false
         repository.expired(now).forEach { item ->
             val uri = Uri.parse(item.uriString)
@@ -59,7 +62,7 @@ class ExpirationWorker(appContext: Context, params: WorkerParameters) : Coroutin
             when (trashManager.moveToTrashInBackground(uri)) {
                 MediaTrashResult.Success -> {
                     if (repository.confirmAndRecordTrashState(uri, trashed = true)) {
-                        trashedCount++
+                        trashedUriStrings += item.uriString
                     } else {
                         shouldRetry = true
                     }
@@ -69,7 +72,9 @@ class ExpirationWorker(appContext: Context, params: WorkerParameters) : Coroutin
                 else -> Unit
             }
         }
-        if (trashedCount > 0) PinshotNotifications.postTrashSummary(applicationContext, trashedCount)
+        if (trashedUriStrings.isNotEmpty()) {
+            PinshotNotifications.postTrashSummary(applicationContext, trashedUriStrings)
+        }
         return if (shouldRetry) Result.retry() else Result.success()
     }
 

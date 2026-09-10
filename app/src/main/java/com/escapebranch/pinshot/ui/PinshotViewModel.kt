@@ -142,7 +142,10 @@ class PinshotViewModel(application: Application) : AndroidViewModel(application)
                     System.currentTimeMillis()
                 )
                 if (captureNotificationTracker.shouldNotify(discovery.newlyTracked.size)) {
-                    PinshotNotifications.postCaptureDetected(getApplication(), discovery.newlyTracked.size)
+                    PinshotNotifications.postCaptureDetected(
+                        getApplication(),
+                        discovery.newlyTracked.map { it.uri.toString() }
+                    )
                 }
                 current to repository.loadVerifiedTrashedScreenshots()
             }

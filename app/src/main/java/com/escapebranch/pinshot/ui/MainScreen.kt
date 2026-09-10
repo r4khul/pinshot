@@ -87,7 +87,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -196,7 +195,6 @@ fun MainScreen(
     var permanentDeleteCandidates by remember { mutableStateOf<List<ScreenshotUiItem>>(emptyList()) }
     val screenshotsGridState = rememberLazyGridState()
     val pagerState = rememberPagerState(initialPage = selectedTab.ordinal) { PinshotTab.entries.size }
-    val pagerScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val message by viewModel.message.collectAsStateWithLifecycle()
     val needsManageMediaPermission by viewModel.needsManageMediaPermission.collectAsStateWithLifecycle()
@@ -475,7 +473,6 @@ fun MainScreen(
                         onClick = {
                             selectedItems.clear()
                             selectedTab = tab
-                            pagerScope.launch { pagerState.animateScrollToPage(tab.ordinal) }
                         },
                         icon = {
                             Icon(
