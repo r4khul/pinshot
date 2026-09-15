@@ -2,7 +2,12 @@ package com.escapebranch.pinshot.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MotionScheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -11,6 +16,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
@@ -97,10 +103,12 @@ private val PinshotTypography = androidx.compose.material3.Typography(
     )
 )
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun PinshotTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = true,
+    expressive: Boolean = true,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {
@@ -112,9 +120,23 @@ fun PinshotTheme(
         else -> lightColorScheme()
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = PinshotTypography,
-        content = content
-    )
+    if (expressive) {
+        MaterialExpressiveTheme(
+            colorScheme = colorScheme,
+            motionScheme = MotionScheme.expressive(),
+            shapes = Shapes(
+                largeIncreased = RoundedCornerShape(28.dp),
+                extraLargeIncreased = RoundedCornerShape(36.dp),
+                extraExtraLarge = RoundedCornerShape(48.dp)
+            ),
+            typography = PinshotTypography,
+            content = content
+        )
+    } else {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = PinshotTypography,
+            content = content
+        )
+    }
 }

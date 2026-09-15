@@ -39,7 +39,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -62,10 +62,13 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.CircularWavyProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -74,6 +77,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SegmentedListItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -119,6 +123,7 @@ import com.escapebranch.pinshot.data.ManageMediaPermissionContract
 import com.escapebranch.pinshot.notifications.NotificationDestinations
 import com.escapebranch.pinshot.R
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -1050,6 +1055,7 @@ private fun ScreenshotImage(
     )
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun ExpiringTab(
     items: List<ScreenshotUiItem>,
@@ -1068,15 +1074,28 @@ private fun ExpiringTab(
             modifier = modifier
         )
     } else {
+        // Keep the expiry display truthful while this tab remains open instead of
+        // waiting for an unrelated state change to recompose the progress ring.
+        val now by produceState(initialValue = System.currentTimeMillis()) {
+            while (true) {
+                delay(60_000)
+                value = System.currentTimeMillis()
+            }
+        }
+        val selectionMode = selectedUris.isNotEmpty()
         LazyColumn(
             modifier = modifier.fillMaxSize(),
             contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)
         ) {
-            items(items, key = { it.uri.toString() }) { item ->
+            itemsIndexed(items, key = { _, item -> item.uri.toString() }) { index, item ->
                 ExpiringRow(
                     item = item,
-                    onClick = { if (selectedUris.isEmpty()) onOpen(item) else onToggleSelection(item) },
+                    now = now,
+                    index = index,
+                    count = items.size,
+                    selectionMode = selectionMode,
+                    onOpen = { onOpen(item) },
                     onPin = { onPin(item) },
                     onTrash = { onTrash(item) },
                     selected = item.uri.toString() in selectedUris,
@@ -1087,53 +1106,51 @@ private fun ExpiringTab(
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun ExpiringRow(
     item: ScreenshotUiItem,
-    onClick: () -> Unit,
+    now: Long,
+    index: Int,
+    count: Int,
+    selectionMode: Boolean,
+    onOpen: () -> Unit,
     onPin: () -> Unit,
     onTrash: () -> Unit,
     selected: Boolean,
     onLongClick: () -> Unit
 ) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            ScreenshotImage(
-                item = item,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(72.dp)
-                    .clip(RoundedCornerShape(8.dp))
+    val shapes = ListItemDefaults.segmentedShapes(index = index, count = count)
+    val colors = ListItemDefaults.segmentedColors(
+        containerColor = MaterialTheme.colorScheme.surfaceContainer
+    )
+    val remainingMillis = item.remainingMillis(now)
+    val leadingContent: @Composable () -> Unit = {
+        ScreenshotImage(
+            item = item,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(72.dp)
+                .clip(RoundedCornerShape(8.dp))
+        )
+    }
+    val supportingContent: @Composable () -> Unit = {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CircularWavyProgressIndicator(
+                progress = {
+                    (remainingMillis.toFloat() / EXPIRATION_MILLIS).coerceIn(0f, 1f)
+                },
+                modifier = Modifier.size(28.dp)
             )
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    item.displayName,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(
-                        progress = { (item.remainingMillis().toFloat() / EXPIRATION_MILLIS).coerceIn(0f, 1f) },
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text("${item.remainingHours()}h left", style = MaterialTheme.typography.labelLarge)
-                }
-            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "${item.remainingHours(now)}h left",
+                style = MaterialTheme.typography.labelLarge
+            )
+        }
+    }
+    val trailingContent: @Composable () -> Unit = {
+        Row {
             IconButton(onClick = onPin) {
                 Icon(Icons.Outlined.PushPin, contentDescription = "Pin and keep")
             }
@@ -1141,7 +1158,41 @@ private fun ExpiringRow(
                 Icon(Icons.Filled.DeleteOutline, contentDescription = "Move to trash")
             }
         }
-        if (selected) Surface(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)) {}
+    }
+    val content: @Composable () -> Unit = {
+        Text(
+            item.displayName,
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+
+    if (selectionMode) {
+        SegmentedListItem(
+            checked = selected,
+            onCheckedChange = { onLongClick() },
+            onLongClick = onLongClick,
+            shapes = shapes,
+            colors = colors,
+            contentPadding = PaddingValues(12.dp),
+            leadingContent = leadingContent,
+            supportingContent = supportingContent,
+            trailingContent = trailingContent,
+            content = content
+        )
+    } else {
+        SegmentedListItem(
+            onClick = onOpen,
+            onLongClick = onLongClick,
+            shapes = shapes,
+            colors = colors,
+            contentPadding = PaddingValues(12.dp),
+            leadingContent = leadingContent,
+            supportingContent = supportingContent,
+            trailingContent = trailingContent,
+            content = content
+        )
     }
 }
 
@@ -1219,6 +1270,7 @@ private fun PermissionContent(onGrant: () -> Unit, modifier: Modifier = Modifier
     )
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun EmptyContent(
     title: String,
@@ -1236,7 +1288,7 @@ fun EmptyContent(
         verticalArrangement = Arrangement.Center
     ) {
         if (loading) {
-            CircularProgressIndicator()
+            LoadingIndicator()
         } else {
             Surface(
                 shape = CircleShape,
