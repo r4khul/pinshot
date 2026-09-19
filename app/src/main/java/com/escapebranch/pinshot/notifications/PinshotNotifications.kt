@@ -162,11 +162,11 @@ object PinshotNotifications {
             .setStyle(NotificationCompat.DecoratedCustomViewStyle())
             .setCustomContentView(notificationView(
                 context, R.layout.notification_pinshot_compact, title, body, uriStrings.size,
-                thumbnails, primaryAction, secondaryAction
+                thumbnails, primaryAction, secondaryAction, showActions = false
             ))
             .setCustomBigContentView(notificationView(
                 context, R.layout.notification_pinshot_expanded, title, body, uriStrings.size,
-                thumbnails, primaryAction, secondaryAction
+                thumbnails, primaryAction, secondaryAction, showActions = true
             ))
             .build()
     }
@@ -179,17 +179,29 @@ object PinshotNotifications {
         count: Int,
         thumbnails: List<Bitmap>,
         primaryAction: NotificationAction,
-        secondaryAction: NotificationAction?
+        secondaryAction: NotificationAction?,
+        showActions: Boolean
     ): RemoteViews = RemoteViews(context.packageName, layoutId).apply {
         setTextViewText(R.id.notification_title, title)
         setTextViewText(R.id.notification_body, body)
-        bindPreviews(thumbnails, count)
-        bindAction(R.id.notification_primary_action, primaryAction)
-        if (secondaryAction == null) {
-            setViewVisibility(R.id.notification_secondary_action, View.GONE)
-            setViewVisibility(R.id.notification_secondary_icon, View.GONE)
-        } else {
-            bindAction(R.id.notification_secondary_action, secondaryAction)
+        bindPreviews(if (showActions) thumbnails else thumbnails.take(1), count)
+        if (showActions) {
+            bindAction(
+                containerId = R.id.notification_primary_action_container,
+                labelId = R.id.notification_primary_action,
+                iconId = R.id.notification_primary_icon,
+                action = primaryAction
+            )
+            if (secondaryAction == null) {
+                setViewVisibility(R.id.notification_secondary_action_container, View.GONE)
+            } else {
+                bindAction(
+                    containerId = R.id.notification_secondary_action_container,
+                    labelId = R.id.notification_secondary_action,
+                    iconId = R.id.notification_secondary_icon,
+                    action = secondaryAction
+                )
+            }
         }
     }
 
@@ -217,16 +229,15 @@ object PinshotNotifications {
         }
     }
 
-    private fun RemoteViews.bindAction(id: Int, action: NotificationAction) {
-        setTextViewText(id, action.label)
-        val iconId = if (id == R.id.notification_primary_action) {
-            R.id.notification_primary_icon
-        } else {
-            R.id.notification_secondary_icon
-        }
+    private fun RemoteViews.bindAction(
+        containerId: Int,
+        labelId: Int,
+        iconId: Int,
+        action: NotificationAction
+    ) {
+        setTextViewText(labelId, action.label)
         setImageViewResource(iconId, action.iconRes)
-        setOnClickPendingIntent(id, action.pendingIntent)
-        setOnClickPendingIntent(iconId, action.pendingIntent)
+        setOnClickPendingIntent(containerId, action.pendingIntent)
     }
 
     private fun pinAllIntent(context: Context, requestCode: Int, uriStrings: List<String>): PendingIntent {
