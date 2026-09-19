@@ -53,6 +53,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PushPin
@@ -307,6 +308,9 @@ fun MainScreen(
             pagerState.animateScrollToPage(selectedTab.ordinal)
         }
     }
+    BackHandler(enabled = selectedItems.isNotEmpty()) {
+        selectedItems.clear()
+    }
     if (!onboardingComplete) {
         OnboardingScreen(
             photosGranted = hasPermission,
@@ -382,7 +386,7 @@ fun MainScreen(
             onDismissRequest = { permanentDeleteCandidates = emptyList() },
             title = {
                 Text(
-                    "Permanently delete ${permanentDeleteCandidates.size} screenshot(s)?",
+                    "Permanently delete ${screenshotCountLabel(permanentDeleteCandidates.size)}?",
                     style = MaterialTheme.typography.headlineSmall
                 )
             },
@@ -409,9 +413,20 @@ fun MainScreen(
             TopAppBar(
                 title = {
                     Text(
-                        if (selectedItems.isEmpty()) "Pinshot" else "${selectedItems.size} selected",
+                        if (selectedItems.isEmpty()) {
+                            if (selectedTab == PinshotTab.Screenshots) "Pinshot" else selectedTab.label
+                        } else {
+                            "${selectedItems.size} selected"
+                        },
                         style = MaterialTheme.typography.titleLarge
                     )
+                },
+                navigationIcon = {
+                    if (selectedItems.isNotEmpty()) {
+                        IconButton(onClick = { selectedItems.clear() }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Clear selection")
+                        }
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                 actions = {
@@ -451,21 +466,22 @@ fun MainScreen(
                                 }
                             }
                         }
-                        IconButton(onClick = { selectedItems.clear() }) { Icon(Icons.Filled.Close, "Clear selection") }
-                    } else if (selectedTab == PinshotTab.Trash) {
+                    } else if (selectedTab == PinshotTab.Trash && trashItems.isNotEmpty()) {
                         IconButton(enabled = !hasPendingMediaMutation, onClick = {
                             permanentDeleteCandidates = trashItems
                         }) { Icon(Icons.Filled.DeleteSweep, "Empty trash") }
                     }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !silentCleanupEnabled) {
-                        IconButton(onClick = viewModel::requestSilentCleanup) {
-                            Icon(Icons.Filled.Settings, "Enable silent cleanup")
+                    if (selectedItems.isEmpty()) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !silentCleanupEnabled) {
+                            IconButton(onClick = viewModel::requestSilentCleanup) {
+                                Icon(Icons.Filled.Settings, "Enable silent cleanup")
+                            }
                         }
-                    }
-                    IconButton(onClick = {
-                        if (hasPermission) viewModel.refresh() else permissionLauncher.launch(permission)
-                    }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh screenshots")
+                        IconButton(onClick = {
+                            if (hasPermission) viewModel.refresh() else permissionLauncher.launch(permission)
+                        }) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh screenshots")
+                        }
                     }
                 }
             )
@@ -530,6 +546,7 @@ fun MainScreen(
                     PinshotTab.Trash -> TrashScreen(
                         items = trashItems,
                         isLoading = viewModel.isLoading.collectAsStateWithLifecycle().value,
+                        onOpen = { viewer = ViewerRequest(it, isTrash = true) },
                         onRestore = viewModel::restore,
                         selectedUris = selectedItems.keys,
                         onToggleSelection = { item -> item.uri.toString().let { if (selectedItems.containsKey(it)) selectedItems.remove(it) else selectedItems[it] = item } },
@@ -809,7 +826,7 @@ private fun DatedScreenshotGrid(
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                text = "${cell.itemCount} screenshots",
+                                text = screenshotCountLabel(cell.itemCount),
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -935,6 +952,23 @@ private fun ScreenshotThumbnail(
             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.36f),
             modifier = Modifier.fillMaxSize()
         ) {}
+        if (selected) {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp)
+                    .size(28.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = "Selected",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.padding(5.dp)
+                )
+            }
+        }
         if (!item.isPinned && item.remainingMillis() > 0L) {
             Surface(
                 shape = CircleShape,
@@ -1325,3 +1359,6 @@ private const val MIN_GALLERY_THUMBNAIL_SIZE_PX = 160
 private const val MAX_GALLERY_THUMBNAIL_SIZE_PX = 512
 private const val GALLERY_THUMBNAIL_CACHE_BYTES = 32 * 1024 * 1024
 private const val EXPIRATION_MILLIS = 24 * 60 * 60 * 1_000L
+
+private fun screenshotCountLabel(count: Int): String =
+    if (count == 1) "1 screenshot" else "$count screenshots"

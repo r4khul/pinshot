@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.RestoreFromTrash
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.MaterialTheme
@@ -38,6 +39,7 @@ import coil.request.ImageRequest
 fun TrashScreen(
     items: List<ScreenshotUiItem>,
     isLoading: Boolean,
+    onOpen: (ScreenshotUiItem) -> Unit,
     onRestore: (ScreenshotUiItem) -> Unit,
     selectedUris: Set<String>,
     onToggleSelection: (ScreenshotUiItem) -> Unit,
@@ -69,7 +71,9 @@ fun TrashScreen(
             TrashThumbnail(
                 item = item,
                 selected = item.uri.toString() in selectedUris,
-                onRestore = { if (selectedUris.isEmpty()) onRestore(item) else onToggleSelection(item) },
+                selectionMode = selectedUris.isNotEmpty(),
+                onOpen = { if (selectedUris.isEmpty()) onOpen(item) else onToggleSelection(item) },
+                onRestore = { onRestore(item) },
                 onLongClick = { onToggleSelection(item) }
             )
         }
@@ -80,6 +84,8 @@ fun TrashScreen(
 private fun TrashThumbnail(
     item: ScreenshotUiItem,
     selected: Boolean,
+    selectionMode: Boolean,
+    onOpen: () -> Unit,
     onRestore: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -100,7 +106,7 @@ private fun TrashThumbnail(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .combinedClickable(onClick = onRestore, onLongClick = onLongClick)
+            .combinedClickable(onClick = onOpen, onLongClick = onLongClick)
     ) {
         AsyncImage(
             model = model,
@@ -112,20 +118,37 @@ private fun TrashThumbnail(
             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.36f),
             modifier = Modifier.fillMaxSize()
         ) {}
-        // The thumbnail remains tappable for the existing quick-restore
-        // behavior. This dedicated control makes the destination explicit.
-        FilledTonalIconButton(
-            onClick = onRestore,
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(4.dp)
-                .size(36.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Filled.RestoreFromTrash,
-                contentDescription = "Restore ${item.displayName} to Screenshots",
-                modifier = Modifier.size(18.dp)
-            )
+        if (selected) {
+            Surface(
+                shape = androidx.compose.foundation.shape.CircleShape,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp)
+                    .size(28.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = "Selected",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.padding(5.dp)
+                )
+            }
+        }
+        if (!selectionMode) {
+            FilledTonalIconButton(
+                onClick = onRestore,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(4.dp)
+                    .size(36.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.RestoreFromTrash,
+                    contentDescription = "Restore ${item.displayName} to Screenshots",
+                    modifier = Modifier.size(18.dp)
+                )
+            }
         }
         Surface(
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
