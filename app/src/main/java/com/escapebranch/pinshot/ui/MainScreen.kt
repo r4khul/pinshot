@@ -296,8 +296,11 @@ fun MainScreen(
             else -> PinshotTab.Screenshots
         }
     }
-    LaunchedEffect(pagerState.currentPage) {
-        val pageTab = PinshotTab.entries[pagerState.currentPage]
+    // currentPage changes while a multi-page animation crosses the middle
+    // page. Only the settled page may update navigation state; otherwise a
+    // Screenshots -> Trash tap is intercepted by Expiring mid-transition.
+    LaunchedEffect(pagerState.settledPage) {
+        val pageTab = PinshotTab.entries[pagerState.settledPage]
         if (selectedTab != pageTab) {
             selectedItems.clear()
             selectedTab = pageTab
