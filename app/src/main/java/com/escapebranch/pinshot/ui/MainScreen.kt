@@ -63,11 +63,14 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.CircularWavyProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
@@ -120,6 +123,7 @@ import com.escapebranch.pinshot.ui.scrubber.TimelineSection
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import com.escapebranch.pinshot.data.ManageMediaPermissionContract
 import com.escapebranch.pinshot.notifications.NotificationDestinations
 import com.escapebranch.pinshot.R
@@ -196,7 +200,8 @@ fun MainScreen(
         )
     }
     var selectedTab by rememberSaveable { mutableStateOf(PinshotTab.Screenshots) }
-    var viewer by remember { mutableStateOf<ViewerRequest?>(null) }
+    var viewerUriString by rememberSaveable { mutableStateOf<String?>(null) }
+    var viewerIsTrash by rememberSaveable { mutableStateOf(false) }
     val selectedItems = remember { mutableStateMapOf<String, ScreenshotUiItem>() }
     var permanentDeleteCandidates by remember { mutableStateOf<List<ScreenshotUiItem>>(emptyList()) }
     val screenshotsGridState = rememberLazyGridState()
@@ -210,6 +215,12 @@ fun MainScreen(
     val screenshotItems by viewModel.screenshots.collectAsStateWithLifecycle()
     val expiringItems by viewModel.expiring.collectAsStateWithLifecycle()
     val trashItems by viewModel.trash.collectAsStateWithLifecycle()
+    val viewer = viewerUriString?.let { uriString ->
+        val source = if (viewerIsTrash) trashItems else screenshotItems
+        source.firstOrNull { it.uri.toString() == uriString }?.let {
+            ViewerRequest(item = it, isTrash = viewerIsTrash)
+        }
+    }
     val visibleUris = when (selectedTab) {
         PinshotTab.Screenshots -> screenshotItems
         PinshotTab.Expiring -> expiringItems
@@ -343,22 +354,22 @@ fun MainScreen(
         ViewerScreen(
             item = request.item,
             isTrash = request.isTrash,
-            onBack = { viewer = null },
+            onBack = { viewerUriString = null },
             onMoveToExpiring = {
                 viewModel.moveToExpiring(request.item)
-                viewer = null
+                viewerUriString = null
             },
             onPin = {
                 viewModel.togglePin(request.item)
-                viewer = null
+                viewerUriString = null
             },
             onTrash = {
                 viewModel.moveToTrash(request.item)
-                viewer = null
+                viewerUriString = null
             },
             onRestore = {
                 viewModel.restore(request.item)
-                viewer = null
+                viewerUriString = null
             }
         )
         return
@@ -532,14 +543,20 @@ fun MainScreen(
                         items = screenshotItems,
                         isLoading = viewModel.isLoading.collectAsStateWithLifecycle().value,
                         gridState = screenshotsGridState,
-                        onOpen = { viewer = ViewerRequest(it, isTrash = false) },
+                        onOpen = {
+                            viewerIsTrash = false
+                            viewerUriString = it.uri.toString()
+                        },
                         selectedUris = selectedItems.keys,
                         onToggleSelection = { item -> item.uri.toString().let { if (selectedItems.containsKey(it)) selectedItems.remove(it) else selectedItems[it] = item } },
                         modifier = Modifier.fillMaxSize()
                     )
                     PinshotTab.Expiring -> ExpiringTab(
                         items = expiringItems,
-                        onOpen = { viewer = ViewerRequest(it, isTrash = false) },
+                        onOpen = {
+                            viewerIsTrash = false
+                            viewerUriString = it.uri.toString()
+                        },
                         onPin = viewModel::togglePin,
                         onTrash = viewModel::moveToTrash,
                         selectedUris = selectedItems.keys,
@@ -549,7 +566,10 @@ fun MainScreen(
                     PinshotTab.Trash -> TrashScreen(
                         items = trashItems,
                         isLoading = viewModel.isLoading.collectAsStateWithLifecycle().value,
-                        onOpen = { viewer = ViewerRequest(it, isTrash = true) },
+                        onOpen = {
+                            viewerIsTrash = true
+                            viewerUriString = it.uri.toString()
+                        },
                         onRestore = viewModel::restore,
                         selectedUris = selectedItems.keys,
                         onToggleSelection = { item -> item.uri.toString().let { if (selectedItems.containsKey(it)) selectedItems.remove(it) else selectedItems[it] = item } },
@@ -1181,14 +1201,14 @@ private fun ExpiringRow(
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                "${item.remainingHours(now)}h left",
+                expirationLabel(remainingMillis),
                 style = MaterialTheme.typography.labelLarge
             )
         }
     }
     val trailingContent: @Composable () -> Unit = {
         Row {
-            IconButton(onClick = onPin) {
+            FilledTonalIconButton(onClick = onPin) {
                 Icon(Icons.Outlined.PushPin, contentDescription = "Pin and keep")
             }
             IconButton(onClick = onTrash) {
@@ -1260,30 +1280,45 @@ private fun ViewerScreen(
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
-                },
-                actions = {
+                }
+            )
+        },
+        bottomBar = {
+            BottomAppBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     if (isTrash) {
-                        IconButton(onClick = onRestore) {
-                            Icon(
-                                Icons.Filled.RestoreFromTrash,
-                                contentDescription = "Restore to Screenshots"
-                            )
+                        Button(onClick = onRestore, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Filled.RestoreFromTrash, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Restore screenshot")
                         }
                     } else {
                         // A pinned screenshot can be given its 24-hour expiry;
                         // an already-expiring screenshot gets the inverse action.
-                        IconButton(onClick = if (item.isPinned) onMoveToExpiring else onPin) {
+                        Button(
+                            onClick = if (item.isPinned) onMoveToExpiring else onPin,
+                            modifier = Modifier.weight(1f)
+                        ) {
                             Icon(
                                 if (item.isPinned) Icons.Filled.HourglassEmpty else Icons.Filled.PushPin,
-                                contentDescription = if (item.isPinned) "Move to Expiring" else "Pin and keep"
+                                contentDescription = null
                             )
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (item.isPinned) "Expire in 24h" else "Pin & keep")
                         }
-                        IconButton(onClick = onTrash) {
-                            Icon(Icons.Filled.DeleteOutline, contentDescription = "Move to trash")
+                        FilledTonalButton(onClick = onTrash, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Filled.DeleteOutline, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Move to trash")
                         }
                     }
                 }
-            )
+            }
         },
         containerColor = MaterialTheme.colorScheme.surface
     ) { padding ->
@@ -1365,3 +1400,11 @@ private const val EXPIRATION_MILLIS = 24 * 60 * 60 * 1_000L
 
 private fun screenshotCountLabel(count: Int): String =
     if (count == 1) "1 screenshot" else "$count screenshots"
+
+private fun expirationLabel(remainingMillis: Long): String = when {
+    remainingMillis <= 0L -> "Expired"
+    remainingMillis < ONE_HOUR_MILLIS -> "Less than 1h left"
+    else -> "${TimeUnit.MILLISECONDS.toHours(remainingMillis)}h left"
+}
+
+private val ONE_HOUR_MILLIS = TimeUnit.HOURS.toMillis(1)
