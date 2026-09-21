@@ -68,7 +68,8 @@ object PinshotNotifications {
         ensureChannel(context)
         val count = uriStrings.size
         val title = if (count == 1) "A screenshot expires in 1 hour" else "$count screenshots expire soon"
-        val reviewIntent = destinationIntent(context, NotificationDestinations.EXPIRING)
+        val contentIntent = destinationIntent(context, NotificationDestinations.EXPIRING)
+        val reviewIntent = openDestinationIntent(context, WARNING_ID, NotificationDestinations.EXPIRING)
         val pinAllIntent = pinAllIntent(context, WARNING_ID, uriStrings)
         val notification = expressiveNotification(
             context = context,
@@ -78,7 +79,7 @@ object PinshotNotifications {
             uriStrings = uriStrings,
             primaryAction = NotificationAction("Pin & keep", R.drawable.ic_notification_pin, pinAllIntent),
             secondaryAction = NotificationAction("Review", R.drawable.ic_notification_review, reviewIntent),
-            contentIntent = reviewIntent,
+            contentIntent = contentIntent,
             category = NotificationCompat.CATEGORY_REMINDER,
             priority = NotificationCompat.PRIORITY_HIGH
         )
@@ -94,7 +95,8 @@ object PinshotNotifications {
         } else {
             "$count screenshots are safely recoverable from trash for 30 days."
         }
-        val trashIntent = destinationIntent(context, NotificationDestinations.TRASH)
+        val contentIntent = destinationIntent(context, NotificationDestinations.TRASH)
+        val trashIntent = openDestinationIntent(context, SUMMARY_ID, NotificationDestinations.TRASH)
         val notification = expressiveNotification(
             context = context,
             channelId = CHANNEL_ID,
@@ -103,7 +105,7 @@ object PinshotNotifications {
             uriStrings = uriStrings,
             primaryAction = NotificationAction("Open trash", R.drawable.ic_notification_review, trashIntent),
             secondaryAction = null,
-            contentIntent = trashIntent,
+            contentIntent = contentIntent,
             category = NotificationCompat.CATEGORY_REMINDER,
             priority = NotificationCompat.PRIORITY_HIGH
         )
@@ -115,7 +117,8 @@ object PinshotNotifications {
         if (!canPost(context) || uriStrings.isEmpty()) return
         ensureChannel(context)
         val count = uriStrings.size
-        val reviewIntent = destinationIntent(context, NotificationDestinations.EXPIRING)
+        val contentIntent = destinationIntent(context, NotificationDestinations.EXPIRING)
+        val reviewIntent = openDestinationIntent(context, CAPTURE_ID, NotificationDestinations.EXPIRING)
         val notification = expressiveNotification(
             context = context,
             channelId = CAPTURE_CHANNEL_ID,
@@ -124,7 +127,7 @@ object PinshotNotifications {
             uriStrings = uriStrings,
             primaryAction = NotificationAction("Pin & keep", R.drawable.ic_notification_pin, pinAllIntent(context, CAPTURE_ID, uriStrings)),
             secondaryAction = NotificationAction("Review", R.drawable.ic_notification_review, reviewIntent),
-            contentIntent = reviewIntent,
+            contentIntent = contentIntent,
             category = NotificationCompat.CATEGORY_STATUS,
             priority = NotificationCompat.PRIORITY_DEFAULT
         )
@@ -132,7 +135,14 @@ object PinshotNotifications {
     }
 
     fun cancelWarning(context: Context) {
-        NotificationManagerCompat.from(context).cancel(WARNING_ID)
+        cancel(context, WARNING_ID)
+    }
+
+    /** Custom RemoteViews actions do not honor auto-cancel, so dismiss directly. */
+    fun cancel(context: Context, notificationId: Int) {
+        if (notificationId != NotificationActionReceiver.NO_NOTIFICATION_ID) {
+            NotificationManagerCompat.from(context).cancel(notificationId)
+        }
     }
 
     private fun expressiveNotification(
@@ -244,6 +254,7 @@ object PinshotNotifications {
         val pinAllIntent = Intent(context, NotificationActionReceiver::class.java).apply {
             action = NotificationActionReceiver.ACTION_PIN_ALL
             putStringArrayListExtra(NotificationActionReceiver.EXTRA_URI_STRINGS, ArrayList(uriStrings))
+            putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, requestCode)
         }
         return PendingIntent.getBroadcast(
             context, requestCode, pinAllIntent,
@@ -287,6 +298,24 @@ object PinshotNotifications {
         )
     }
 
+    private fun openDestinationIntent(
+        context: Context,
+        notificationId: Int,
+        destination: String
+    ): PendingIntent {
+        val intent = Intent(context, NotificationActionReceiver::class.java).apply {
+            action = NotificationActionReceiver.ACTION_OPEN_DESTINATION
+            putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, notificationId)
+            putExtra(NotificationActionReceiver.EXTRA_DESTINATION, destination)
+        }
+        return PendingIntent.getBroadcast(
+            context,
+            OPEN_DESTINATION_REQUEST_CODE_OFFSET + notificationId,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
     private fun resolveAccentColor(context: Context): Int {
         val value = TypedValue()
         return if (context.theme.resolveAttribute(android.R.attr.colorAccent, value, true)) value.data else Color.BLUE
@@ -297,4 +326,6 @@ object PinshotNotifications {
         val iconRes: Int,
         val pendingIntent: PendingIntent
     )
+
+    private const val OPEN_DESTINATION_REQUEST_CODE_OFFSET = 10_000
 }
